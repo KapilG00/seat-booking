@@ -4,7 +4,7 @@ A JSON API that sells assigned seats for a show and stays correct under an
 on-sale stampede: no seat is ever sold twice, no user exceeds their limit, and
 a retried request never reserves twice.
 
-- **Live URL:** `https://<your-service>.onrender.com` _(fill in after deploy)_
+- **Live URL:** `https://seat-booking-api-2lwj.onrender.com`
 - **Design write-up:** [WRITEUP.md](WRITEUP.md)
 
 ## For graders: testing the live service
