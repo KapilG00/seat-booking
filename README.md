@@ -7,7 +7,7 @@ a retried request never reserves twice.
 - **Live URL:** `https://seat-booking-api-2lwj.onrender.com`
 - **Design write-up:** [WRITEUP.md](WRITEUP.md)
 
-## For graders: testing the live service
+## Testing the live service
 
 1. You need the **admin token**. It is shared with the submission, not stored in git.
    It is required to create a show and to mint user tokens.
@@ -16,7 +16,7 @@ a retried request never reserves twice.
    Each user token's `sub` is that user's identity.
 4. Reserve with the user tokens. Or run the whole stampede plus checks in one command:
    ```bash
-   make burst URL=https://<your-service>.onrender.com ADMIN_TOKEN=<admin token>
+   make burst URL=https://seat-booking-api-2lwj.onrender.com ADMIN_TOKEN=<admin token>
    ```
 
 ## API
@@ -134,9 +134,9 @@ were answered from memory.
 ## One-command burst
 
 ```bash
-make burst URL=https://<your-service>.onrender.com ADMIN_TOKEN=<admin token>
+make burst URL=https://seat-booking-api-2lwj.onrender.com ADMIN_TOKEN=<admin token>
 # or
-ADMIN_TOKEN=<admin token> ./burst.sh https://<your-service>.onrender.com
+ADMIN_TOKEN=<admin token> ./burst.sh https://seat-booking-api-2lwj.onrender.com
 # locally (dev admin token is the default)
 make burst
 ```
@@ -192,8 +192,8 @@ produces 5xx, so use **Starter or larger** for a 20k burst.
    git. The app refuses to start in production with the dev secrets.
 4. Wait for the deploy to go live, then:
    ```bash
-   curl https://<service>.onrender.com/readyz
-   make burst URL=https://<service>.onrender.com ADMIN_TOKEN=...
+   curl https://seat-booking-api-2lwj.onrender.com/readyz
+   make burst URL=https://seat-booking-api-2lwj.onrender.com ADMIN_TOKEN=...
    ```
 
 Every push to `main` redeploys.
