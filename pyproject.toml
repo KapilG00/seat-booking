@@ -10,10 +10,14 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic-settings>=2.4",
     "asyncpg>=0.31.0",
+    "pyjwt>=2.15.1",
+    "structlog>=26.1.0",
+    "prometheus-client>=0.26.0",
 ]
 
 [dependency-groups]
 dev = [
+    "anyio>=4.15.1",
     "httpx2>=2.13.1",
     "pytest>=8",
 ]
