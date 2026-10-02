@@ -4,7 +4,7 @@ services:
   - type: web
     name: seat-booking-api
     runtime: docker
-    plan: free            # switch to "starter" for an always-on instance (no cold starts)
+    plan: starter         # 0.5 CPU, always on: passes the 20k burst; "free" (0.1 CPU) does not
     region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /readyz   # traffic only reaches an instance whose DB check passes
