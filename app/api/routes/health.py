@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+
+from app.api.deps import get_db
+from app.db.database import Database
 
 router = APIRouter(tags=["health"])
 
@@ -11,11 +14,9 @@ async def liveness() -> dict[str, str]:
 
 
 @router.get("/readyz")
-async def readiness(request: Request) -> JSONResponse:
+async def readiness(db: Database = Depends(get_db)) -> JSONResponse:
     """Readiness: can we serve traffic? Fails closed if the DB isn't reachable."""
-    ok, reason = await request.app.state.db.ping()
+    ok, reason = await db.ping()
     if ok:
         return JSONResponse({"status": "ready", "database": "ok"})
-    return JSONResponse(
-        {"status": "not_ready", "database": reason}, status_code=503
-    )
+    return JSONResponse({"status": "not_ready", "database": reason}, status_code=503)
