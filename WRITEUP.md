@@ -169,10 +169,6 @@ Logs carry one JSON line per request with `request_id`, which is echoed in
 `X-Request-ID`, so a customer complaint maps to exactly one line.
 
 ## 6. AI usage (directed vs decided)
-
-> _Review and edit this section yourself before submitting. It must be honest
-> in your own words._
-
 Built with Claude Code (Claude Opus 5.5) in an interactive session.
 - **I directed**:
   - the stack (FastAPI, Postgres, uv) and the platform (Render);
