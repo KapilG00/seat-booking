@@ -252,7 +252,7 @@ The burst script waits for `/readyz` before starting.
   - `route`, `status`, `duration_ms`.
   - For reserves: `show_id`, `user_id`, `seats`, `outcome`, `reason` and `reservation_id`.
 
-  On Render, view them under the service's **Logs** tab. _(Link a recording or log share here.)_
+  On Render, view them under the service's **Logs** tab.
 
 ## Configuration
 
