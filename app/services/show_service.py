@@ -1,4 +1,5 @@
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -15,6 +16,13 @@ class ShowInfo:
     id: uuid.UUID
     price_paise: int
     per_user_limit: int
+    # Every seat label of the show: lets the in-memory decline path reject
+    # unknown seats exactly like the database path does (422, not 409).
+    seat_labels: frozenset[str]
+
+
+# Shows whose price/limit/labels stay cached; the burst only ever touches a few.
+INFO_CACHE_MAX_SHOWS = 256
 
 
 class ShowService:
@@ -23,9 +31,10 @@ class ShowService:
     def __init__(self, db: Database, settings: Settings) -> None:
         self._db = db
         self._settings = settings
-        # Shows are immutable once created, so caching price/limit is safe and
-        # saves a round trip on every reserve during the burst.
-        self._info_cache: dict[uuid.UUID, ShowInfo] = {}
+        # Shows are immutable once created, so caching price/limit/labels is
+        # safe and saves a round trip on every reserve during the burst.
+        # Bounded LRU so a long-lived process with many shows can't grow forever.
+        self._info_cache: OrderedDict[uuid.UUID, ShowInfo] = OrderedDict()
 
     async def create(
         self, *, name: str, seats: list[str], price_paise: int, per_user_limit: int | None
@@ -69,16 +78,22 @@ class ShowService:
         }
 
     def cached_info(self, show_id: uuid.UUID) -> ShowInfo | None:
-        """Price/limit if already cached; never touches the database."""
+        """Price/limit/labels if already cached; never touches the database."""
         return self._info_cache.get(show_id)
 
     async def info(self, conn: AsyncConnection, show_id: uuid.UUID) -> ShowInfo:
-        """Price and limit for the reserve hot path (cached; uses the caller's connection)."""
+        """Price, limit and labels for the reserve hot path (cached; uses the caller's connection)."""
         info = self._info_cache.get(show_id)
         if info is None:
-            row = await ShowRepository(conn).get_info(show_id)
+            repo = ShowRepository(conn)
+            row = await repo.get_info(show_id)
             if row is None:
                 raise NotFound("show not found", show_id=str(show_id))
-            info = ShowInfo(row.id, row.price_paise, row.per_user_limit)
+            labels = frozenset(await repo.seat_labels(show_id))
+            info = ShowInfo(row.id, row.price_paise, row.per_user_limit, labels)
             self._info_cache[show_id] = info
+            if len(self._info_cache) > INFO_CACHE_MAX_SHOWS:
+                self._info_cache.popitem(last=False)
+        else:
+            self._info_cache.move_to_end(show_id)
         return info

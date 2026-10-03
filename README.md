@@ -30,7 +30,7 @@ a retried request never reserves twice.
 | `POST` | `/reservations/{id}/cancel` | owner | Releases the seats; repeat cancel is a no-op |
 | `GET` | `/reservations/{id}` | owner | Fetch own reservation |
 | `GET` | `/healthz` | none | Liveness (process up; no dependency checks) |
-| `GET` | `/readyz` | none | Readiness: `SELECT 1` within 1s, else **503** (fails closed) |
+| `GET` | `/readyz` | none | Readiness: `SELECT 1` within 1s on a dedicated probe pool, else **503** (fails closed) |
 | `GET` | `/metrics` | none | Prometheus metrics |
 | `GET` | `/docs` | none | Interactive OpenAPI docs |
 
@@ -56,6 +56,20 @@ user's seats.
 **Partial requests are all-or-nothing**: `["A12","A13"]` with A13 taken confirms
 neither and returns 409 listing `A13`. Money is integer paise throughout; floats
 and strings are rejected for `price_paise`.
+
+When several declines apply, the first in this order wins (the same with or
+without the sold-seat cache): unknown seat (422) → more seats than
+`per_user_limit` in one request → `seat_taken` → `per_user_limit` given the
+seats the user already holds.
+
+Idempotency keys are scoped per user, across all shows: reusing a key on a
+different show is `idempotency_key_reused`. Replaying the key of a reservation
+that was since cancelled returns it as it is now (200, `status: "cancelled"`);
+it does not re-reserve.
+
+Seats go straight from `available` to `confirmed` (the release model is explicit
+cancel, not timed holds), so `counts.held` is always 0. It is kept in the
+response and the invariant so time-boxed holds can be added without changing the API.
 
 Example:
 
@@ -119,10 +133,15 @@ During an on-sale burst ~95% of reserve requests are for seats that are already 
 from memory, with no database query and no pool connection.
 
 - **It can only decline.** Every sale is still decided by the guarded `UPDATE` in Postgres.
-- **Idempotency is unaffected.** A request whose idempotency key this process has seen
-  succeed always goes to the database, so retries still get their 200 replay and a
-  reused key still gets `idempotency_key_reused`.
-- **Cancelled seats are rebookable immediately.** A cancel removes its seats as soon as it commits.
+- **It knows each seat's owner and never declines the owner.** A user asking for a seat
+  they hold may be retrying, so that request goes to the database and gets its 200 replay.
+  Keys this process has seen also go to the database, so a reused key still gets
+  `idempotency_key_reused`.
+- **Cancelled seats are rebookable immediately.** A cancel removes its seats as soon as
+  it commits, and a request that read the seat as taken *before* the cancel can't
+  put it back afterwards (release fencing).
+- **Same answers as the database path.** It rejects unknown seats and over-limit
+  requests exactly like the database precheck does.
 - **Entries expire after `SOLD_SEAT_CACHE_TTL_SECONDS` (30 s).** This bounds staleness if
   the service is ever scaled to several instances.
 - **It can be switched off** with `SOLD_SEAT_CACHE_ENABLED=false`.
@@ -225,7 +244,9 @@ The burst script waits for `/readyz` before starting.
   | `sold_seat_cache_declines_total` | counter | `seat_taken` declines answered from memory |
 
   The seat gauges are read from Postgres at scrape time, so they always match
-  `GET /shows/{id}`. Counters are per process and reset on restart.
+  `GET /shows/{id}`. That read, like `/readyz`, uses a separate 2-connection probe
+  pool, so scrapes neither wait for nor take request connections during a burst.
+  Counters are per process and reset on restart.
 - **Logs**: one JSON line per request on stdout, containing:
   - `request_id`: your `X-Request-ID` if sent, otherwise generated, and always echoed back in the response.
   - `route`, `status`, `duration_ms`.
@@ -246,6 +267,7 @@ All settings are environment variables. See [.env.example](.env.example). Key on
 | `DB_POOL_ACQUIRE_TIMEOUT` | Default 45 s; how long a request waits for a DB connection before a 503 |
 | `DB_LOCK_TIMEOUT_MS` | |
 | `DB_STATEMENT_TIMEOUT_MS` | |
+| `DB_PROBE_STATEMENT_TIMEOUT_MS` | Default 5000; statement timeout for `/readyz` and the metrics seat gauges |
 | `ACCESS_LOG` | |
 | `SOLD_SEAT_CACHE_ENABLED` | Default `true` |
 | `SOLD_SEAT_CACHE_TTL_SECONDS` | Default 30 |

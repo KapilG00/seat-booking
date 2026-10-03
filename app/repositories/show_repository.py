@@ -10,6 +10,8 @@ _SHOW_INFO = select(Show.id, Show.price_paise, Show.per_user_limit).where(
     Show.id == bindparam("show_id")
 )
 
+_SEAT_LABELS = select(Seat.label).where(Seat.show_id == bindparam("show_id"))
+
 
 class ShowRepository:
     """Data access for shows and their seats. One method = one statement.
@@ -24,6 +26,10 @@ class ShowRepository:
     async def get_info(self, show_id: uuid.UUID) -> Row | None:
         """(id, price_paise, per_user_limit). Works on a connection or session."""
         return (await self._db.execute(_SHOW_INFO, {"show_id": show_id})).one_or_none()
+
+    async def seat_labels(self, show_id: uuid.UUID) -> list[str]:
+        """All seat labels of a show. Works on a connection or session."""
+        return list((await self._db.execute(_SEAT_LABELS, {"show_id": show_id})).scalars())
 
     async def add(self, show: Show, seat_labels: list[str]) -> None:
         """Insert the show and all its seats (requires a session in a transaction)."""

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # Readiness probe budget for `SELECT 1`.
     db_ready_timeout: float = 1.0
     db_statement_timeout_ms: int = 15_000
+    # Statement timeout on the probe pool (/readyz, /metrics seat gauges).
+    db_probe_statement_timeout_ms: int = 5_000
     db_lock_timeout_ms: int = 10_000
     # Log every SQL statement (debugging only; very noisy under load).
     db_echo: bool = False

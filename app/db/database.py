@@ -46,6 +46,11 @@ class Database:
       * `connect()` / `read_connect()` - Core connections, the same two modes,
         for the reserve hot path.
 
+    Except the probes: `/readyz` and the `/metrics` seat gauges use their own
+    tiny AUTOCOMMIT pool (`probe_session()`). Otherwise a burst that saturates
+    the request pool would make `/readyz` time out, and the platform's health
+    check would pull (or restart) a perfectly healthy instance mid-burst.
+
     Connecting and migrating happen in the background so the app starts (and
     /healthz answers) even when Postgres is down; /readyz reports 503 until
     the schema is current.
@@ -73,6 +78,23 @@ class Database:
             },
         )
         self._autocommit_engine = self.engine.execution_options(isolation_level="AUTOCOMMIT")
+        self._probe_engine: AsyncEngine = create_async_engine(
+            async_database_url(settings.database_url),
+            isolation_level="AUTOCOMMIT",
+            # One for /readyz, one for a /metrics scrape, so neither waits on the other.
+            pool_size=2,
+            max_overflow=0,
+            pool_timeout=settings.db_ready_timeout,
+            # A connection left broken by a DB restart is replaced, not reported as "not ready".
+            pool_pre_ping=True,
+            connect_args={
+                "server_settings": {
+                    "statement_timeout": str(settings.db_probe_statement_timeout_ms),
+                    "application_name": f"{settings.app_name}-probe",
+                }
+            },
+        )
+        self._probe_session = async_sessionmaker(self._probe_engine, expire_on_commit=False)
         self._session = async_sessionmaker(self.engine, expire_on_commit=False)
         self._read_session = async_sessionmaker(self._autocommit_engine, expire_on_commit=False)
         self._ready = False
@@ -118,6 +140,7 @@ class Database:
         if self._connect_task and not self._connect_task.done():
             self._connect_task.cancel()
         await self.engine.dispose()
+        await self._probe_engine.dispose()
 
     def session(self) -> AsyncSession:
         if not self._ready:
@@ -128,6 +151,12 @@ class Database:
         if not self._ready:
             raise DatabaseUnavailable("database_not_ready")
         return self._read_session()
+
+    def probe_session(self) -> AsyncSession:
+        """AUTOCOMMIT session on the probe pool (readiness, metrics gauges)."""
+        if not self._ready:
+            raise DatabaseUnavailable("database_not_ready")
+        return self._probe_session()
 
     # Core connections for the reserve hot path: same pool and same tables as
     # the ORM, minus the Session layer (identity map, unit of work), whose
@@ -147,12 +176,13 @@ class Database:
         return {"size": pool.size(), "checked_out": pool.checkedout()}
 
     async def ping(self) -> tuple[bool, str | None]:
-        """Run `SELECT 1` within the readiness budget. Never raises."""
+        """Run `SELECT 1` within the readiness budget, on the probe pool so a
+        busy request pool doesn't read as "not ready". Never raises."""
         if not self._ready:
             return False, "not_initialized"
         try:
             async with asyncio.timeout(self._settings.db_ready_timeout):
-                async with self.read_session() as session:
+                async with self.probe_session() as session:
                     await session.execute(text("SELECT 1"))
             return True, None
         except TimeoutError:

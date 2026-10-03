@@ -36,6 +36,9 @@ _PRECHECK = select(
     func.array_agg(aggregate_order_by(_seats.c.label, _seats.c.label))
     .filter(_seats.c.status != "available")
     .label("taken"),
+    func.array_agg(aggregate_order_by(_seats.c.user_id, _seats.c.label))
+    .filter(_seats.c.status != "available")
+    .label("taken_owners"),
     select(_counts.c.held)
     .where(_counts.c.show_id == bindparam("b_show_id"), _counts.c.user_id == bindparam("b_user_id"))
     .scalar_subquery()
@@ -108,7 +111,8 @@ class ReservationRepository:
         return (await self._db.execute(_FIND_BY_KEY, {"b_user_id": user_id, "b_key": key})).one_or_none()
 
     async def precheck(self, show_id: uuid.UUID, user_id: str, labels: list[str]) -> Row:
-        """Lock-free read: (found, taken, held) for an early decline."""
+        """Lock-free read: (found, taken, taken_owners, held) for an early decline.
+        `taken` and `taken_owners` are parallel arrays, sorted by label."""
         params = {"b_show_id": show_id, "b_user_id": user_id, "b_labels": labels}
         return (await self._db.execute(_PRECHECK, params)).one()
 

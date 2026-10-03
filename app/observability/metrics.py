@@ -80,7 +80,9 @@ async def refresh_db_gauges(db) -> None:
         .group_by(recent.c.id, recent.c.total_seats)
     )
     try:
-        async with db.read_session() as session:
+        # Probe pool: a scrape during a burst neither waits for nor takes a
+        # request connection.
+        async with db.probe_session() as session:
             rows = (await session.execute(stmt)).mappings().all()
     except Exception:
         METRICS_DB_SCRAPE_OK.set(0)

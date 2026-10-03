@@ -32,3 +32,21 @@ def test_readiness_fails_closed_when_database_is_unreachable():
         assert response.json()["status"] == "not_ready"
         # Liveness is independent of the database.
         assert client.get("/healthz").status_code == 200
+
+
+def test_readiness_stays_green_when_the_request_pool_is_exhausted():
+    """A burst that holds every request connection must not fail /readyz
+    (the platform health check would pull a healthy instance)."""
+    import asyncio
+
+    settings = Settings(db_pool_max_size=1, db_pool_acquire_timeout=0.2)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert wait_for_status(client, "/readyz", 200).status_code == 200
+
+        async def hold_pool_and_probe():
+            async with app.state.db.connect():  # the only request connection
+                ok, _ = await app.state.db.ping()
+                return ok
+
+        assert client.portal.call(hold_pool_and_probe)

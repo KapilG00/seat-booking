@@ -77,6 +77,14 @@ def _limit_error(show: ShowInfo) -> PerUserLimitExceeded:
     )
 
 
+def _check_static(show: ShowInfo, labels: list[str]) -> None:
+    """Checks that need only the show itself (no seat or user state)."""
+    if not show.seat_labels.issuperset(labels):
+        raise InvalidRequest("one or more seats do not exist for this show")
+    if len(labels) > show.per_user_limit:
+        raise _limit_error(show)
+
+
 def _replay_or_conflict(existing: Row, req_hash: str) -> "ReserveResult":
     if existing.request_hash != req_hash:
         raise IdempotencyKeyReused(
@@ -107,23 +115,28 @@ class ReservationService:
 
         # Fast decline from memory: no connection, no query. Skipped when this
         # key is known to exist, so replays/key-reuse are resolved by the DB.
+        # Applies the same checks, in the same order, as _precheck, so the
+        # answer never depends on whether the cache was warm.
         if self._cache is not None and not self._cache.knows_key(user_id, key):
-            taken = self._cache.taken(show_id, labels)
-            if taken:
-                show = self._shows.cached_info(show_id)
-                if show is not None and len(labels) > show.per_user_limit:
-                    raise _limit_error(show)
-                SOLD_SEAT_CACHE_DECLINES.inc()
-                raise SeatTaken("seat already taken", seats=taken)
+            show = self._shows.cached_info(show_id)
+            if show is not None:
+                _check_static(show, labels)
+                taken = self._cache.taken_by_others(show_id, labels, user_id)
+                if taken:
+                    SOLD_SEAT_CACHE_DECLINES.inc()
+                    raise SeatTaken("seat already taken", seats=taken)
 
         async with self._db.read_connect() as conn:
             show = await self._shows.info(conn, show_id)
-            if len(labels) > show.per_user_limit:
-                raise _limit_error(show)
+            _check_static(show, labels)
             repo = ReservationRepository(conn)
+            # Fence for the cache: a cancel committing after this point must
+            # not be undone by us caching what we are about to read.
+            epoch = self._cache.epoch() if self._cache is not None else 0
+            row = await repo.precheck(show.id, user_id, labels)
             try:
-                await self._precheck(repo, show, user_id, labels)
-            except (SeatTaken, PerUserLimitExceeded) as exc:
+                self._precheck(row, show, labels)
+            except (SeatTaken, PerUserLimitExceeded):
                 # A retry of an already-successful request looks "taken"/"over
                 # limit" to the precheck (it took the seats itself), so check
                 # the key before declining.
@@ -131,8 +144,8 @@ class ReservationService:
                 if existing is not None:
                     self._remember_key(user_id, key)
                     return _replay_or_conflict(existing, req_hash)
-                if isinstance(exc, SeatTaken):
-                    self._mark_taken(show_id, exc.extra["seats"])
+                if row.taken:
+                    self._mark_taken(show_id, dict(zip(row.taken, row.taken_owners)), since=epoch)
                 raise
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -141,9 +154,9 @@ class ReservationService:
                     reservation = await self._reserve_txn(
                         ReservationRepository(conn), show, user_id, labels, key, req_hash
                     )
-                # Committed. Key first, then seats, with no await in between.
+                # Committed: remember the key and cache the seats as ours.
                 self._remember_key(user_id, key)
-                self._mark_taken(show_id, labels)
+                self._mark_taken(show_id, dict.fromkeys(labels, user_id))
                 return ReserveResult(reservation, created=True)
             except _KeyAlreadyUsed:
                 async with self._db.read_connect() as conn:
@@ -162,19 +175,20 @@ class ReservationService:
         raise SeatTaken("seat is being booked by someone else", seats=labels)
 
     @staticmethod
-    async def _precheck(
-        repo: ReservationRepository, show: ShowInfo, user_id: str, labels: list[str]
-    ) -> None:
-        """Cheap, lock-free early decline. NOT the decision: the transaction
-        re-checks everything with guarded writes, so a stale read here can only
-        cause a decline that would have happened anyway, never a double-sell."""
-        row = await repo.precheck(show.id, user_id, labels)
+    def _precheck(row: Row, show: ShowInfo, labels: list[str]) -> None:
+        """Cheap, lock-free early decline from `repo.precheck`. NOT the
+        decision: the transaction re-checks everything with guarded writes, so
+        a stale read here can only cause a decline that would have happened
+        anyway, never a double-sell.
+
+        Order (shared with the in-memory path): unknown seat (422) -> request
+        bigger than the limit -> seat taken -> limit given what's already held."""
         if row.found != len(labels):
             raise InvalidRequest("one or more seats do not exist for this show")
-        if (row.held or 0) + len(labels) > show.per_user_limit:
-            raise _limit_error(show)
         if row.taken:
             raise SeatTaken("seat already taken", seats=list(row.taken))
+        if (row.held or 0) + len(labels) > show.per_user_limit:
+            raise _limit_error(show)
 
     @staticmethod
     async def _reserve_txn(
@@ -259,9 +273,9 @@ class ReservationService:
         if self._cache is not None:
             self._cache.remember_key(user_id, key)
 
-    def _mark_taken(self, show_id: uuid.UUID, labels: list[str]) -> None:
+    def _mark_taken(self, show_id: uuid.UUID, owners: dict[str, str], since: int | None = None) -> None:
         if self._cache is not None:
-            self._cache.mark_taken(show_id, labels)
+            self._cache.mark_taken(show_id, owners, since=since)
 
     async def get(self, reservation_id: uuid.UUID, user_id: str) -> dict:
         async with self._db.read_session() as session:

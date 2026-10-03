@@ -47,14 +47,27 @@ reservations at once.
 2. **Lock-free precheck.** Otherwise one `SELECT` declines requests whose seats are
    taken or whose user is at the limit, keeping the hot-seat losers off the row lock.
 
+Both apply the same checks in the same order, so the answer never depends on
+whether the cache was warm: unknown seat (422) → request bigger than the limit →
+`seat_taken` → `per_user_limit` given what the user already holds.
+
 Neither can cause a double-sell:
 - Both can only **decline**. A request they let through still has to win the guarded
   `UPDATE` in the transaction.
 - A stale "free" just sends the request on to the transaction, which decides correctly.
 - A stale "taken" is bounded:
   - the cache drops a seat the moment its cancel commits;
+  - **release fencing**: a request that read "taken" from the database before a
+    cancel committed can't put the seat back in the cache afterwards. The cache keeps
+    a release sequence; a request notes it before its read and may only cache seats
+    not released since;
   - entries expire after a TTL.
-- A request whose idempotency key is known always skips the cache, so replays are unaffected.
+- **Each cached seat records its owner**, and a request is only declined from memory
+  for seats owned by *someone else*. If the requester owns a requested seat, it may
+  be a retry of their own booking, so the database decides (replay or
+  `idempotency_key_reused`). This holds even when another user's request cached the
+  seat before the original request had recorded its key.
+- A request whose idempotency key this process has seen also skips the cache.
 
 **Multi-seat and deadlock avoidance.** Partial requests are **all-or-nothing**:
 one transaction, so any taken seat rolls back the others. Every transaction locks
@@ -101,9 +114,9 @@ overlapping-pair requests arrive in shuffled orders and exercise this.
   where the original failed, if the seat was freed in between.
 - **Replaying after a cancel** returns the original reservation in its current
   state (`cancelled`). It does not re-reserve.
-- **Interaction with the sold-seat cache.** The cache remembers which
-  `(user_id, key)` pairs it has seen exist, and those requests always go to the
-  database.
+- **Interaction with the sold-seat cache.** A request never gets a cache decline
+  for a seat its own user owns, and `(user_id, key)` pairs the process has seen
+  always go to the database, so retries always reach the replay logic.
   - The one gap: a key used *before a process restart* and then reused for a seat sold
     *after* it is declined as `seat_taken` instead of `idempotency_key_reused`.
   - That is still a 409, and never a sale.
@@ -157,6 +170,9 @@ Replicas would only serve reads such as `GET /shows`.
 - **`show_invariant_ok == 0`** for any show. This "should never happen" is the
   double-sell or leaked-seat alarm.
 - **`/readyz` failing** (from the platform health check), or `metrics_db_scrape_ok == 0`.
+  Both run on a separate 2-connection probe pool, so a burst that saturates the
+  request pool doesn't read as "not ready" (and doesn't get a healthy instance
+  pulled or restarted mid-burst); they fail only when the database itself is unreachable.
 - **Reserve p99 latency** above ~2s sustained: pool saturation, lock queues, or a slow DB.
 - **`reservation_txn_retries_total` increasing**: deadlocks shouldn't happen given
   the lock order, so a rise means someone broke the ordering.
